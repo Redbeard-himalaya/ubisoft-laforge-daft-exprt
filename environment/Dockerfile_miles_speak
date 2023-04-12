@@ -1,0 +1,72 @@
+ARG GCS_ACCESS_KEY
+ARG GCS_SECRET_KEY
+ARG GCS_BUCKET
+ARG GCS_PATH="ai_models/ubisoft-laforge-daft-exprt"
+ARG MODEL_DIR="model"
+
+FROM python:3.10-slim as model_downloader
+ARG GCS_ACCESS_KEY
+ARG GCS_SECRET_KEY
+ARG GCS_BUCKET
+ARG GCS_PATH
+ARG MODEL_DIR
+
+WORKDIR /${MODEL_DIR}
+RUN apt-get update && apt-get install -y wget && \
+    pip install gsutil && \
+    echo "modle downloading daft-exprt model ..." && \
+    gsutil -m -o "Credentials:gs_access_key_id=${GCS_ACCESS_KEY}" -o "Credentials:gs_secret_access_key=${GCS_SECRET_KEY}" rsync -r gs://${GCS_BUCKET}/${GCS_PATH} /${MODEL_DIR}
+
+
+# below docker origins from
+# https://github.com/ubisoft/ubisoft-laforge-daft-exprt/blob/master/environment/Dockerfile
+FROM nvidia/cuda:11.2.0-base-ubuntu20.04 as runtime
+
+# set environment variables
+ARG DEBIAN_FRONTEND=noninteractive
+ENV CONDA_AUTO_UPDATE_CONDA=false
+ENV PATH=/root/miniconda3/bin:$PATH
+
+# install linux packages
+RUN apt-get update && apt-get install -y curl libsndfile1 libopenblas-dev wget zip
+RUN rm -rf /var/lib/apt/lists/*
+
+# install miniconda and python 3.8
+RUN curl -sLo miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+    && chmod +x ./miniconda.sh \
+    && ./miniconda.sh -b -p /root/miniconda3 \
+    && rm miniconda.sh \
+    && conda install -y python==3.8 \
+    && conda clean -ya
+
+# install conda and pip packages
+COPY ./environment/conda_requirements.txt /opt/daft_exprt/environment/
+COPY ./environment/pip_requirements.txt /opt/daft_exprt/environment/
+WORKDIR /opt/daft_exprt/environment
+RUN conda install -c conda-forge -y --file conda_requirements.txt
+RUN pip install -r pip_requirements.txt
+
+# install PyTorch
+RUN pip install torch==1.9.0+cu111 torchaudio==0.9.0 tensorboard -f https://download.pytorch.org/whl/torch_stable.html
+
+# install MFA thirdparty packages
+RUN mfa thirdparty download
+RUN mfa thirdparty validate
+
+# download pre-trained MFA models for english
+RUN mfa download acoustic english
+RUN mfa download g2p english_g2p
+RUN mfa download dictionary english
+
+# set working directory
+ARG DAFT_DIR="/daft_exprt"
+WORKDIR ${DAFT_DIR}
+
+RUN cd /tmp && \
+    wget https://github.com/Redbeard-himalaya/ubisoft-laforge-daft-exprt/archive/refs/heads/master.zip && \
+    unzip master.zip && \
+    mv ubisoft-laforge-daft-exprt-master/* ${DAFT_DIR}/ && \
+    rm -rf ubisoft-laforge-daft-exprt-master master.zip
+
+ARG MODEL_DIR
+COPY --from=model_downloader /${MODEL_DIR} ${DAFT_DIR}/${MODEL_DIR}
